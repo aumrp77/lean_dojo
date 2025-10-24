@@ -88,33 +88,67 @@ def cleanse_string(s: Union[str, Path]) -> str:
 
 @cache
 def _to_commit_hash(repo: Repository, label: str) -> str:
-    """Convert a tag or branch to a commit hash."""
+    """Convert a tag or branch to a commit hash with fallback strategies."""
     logger.debug(f"Querying the commit hash for {repo.name} {label}")
-    
-    # Poor man's cache
-    if repo.name == "lean4":
-        if label == "v4.23.0-rc2":
-            return "ad1a017949674a947f0d6794cbf7130d642c6530"
-        elif label == "v4.17.0":
-            return "306f36116535cd226329f562b4675b8b6dbf948c"
-        elif label == "v4.8.0-rc2":
-            return "873ef2d894af80d8fc672e35f7e28bae314a1f6f"
-    
-    # if the label is a commit hash, return it directly
-    if len(label) == 40 and _COMMIT_REGEX.fullmatch(label.strip()):
-        return label
 
-    for branch in repo.get_branches():
-        if branch.name == label:
-            print(f"Found branch {branch.name} with commit {branch.commit.sha}")
-            return branch.commit.sha
+    label_stripped = (label or "").strip()
+    if len(label_stripped) == 40 and _COMMIT_REGEX.fullmatch(label_stripped):
+        return label_stripped
 
-    for tag in repo.get_tags():
-        if tag.name == label:
-            print(f"Found tag {tag.name} with commit {tag.commit.sha}")
-            return tag.commit.sha
+    candidates = []
+    if label_stripped.startswith("v"):
+        candidates += [label_stripped, label_stripped.lstrip("v")]
+    else:
+        candidates += [label_stripped, f"v{label_stripped}"]
+
+    base = label_stripped[1:] if label_stripped.startswith("v") else label_stripped
+    if "-rc" in base:
+        base_no_rc = base.split("-rc", 1)[0]
+        candidates += [base_no_rc, f"v{base_no_rc}"]
+
+    seen = set()
+    uniq = []
+    for cand in candidates:
+        if cand and cand not in seen:
+            uniq.append(cand)
+            seen.add(cand)
+    candidates = uniq
+
+    for cand in candidates:
+        try:
+            ref = repo.get_git_ref(f"tags/{cand}")
+            obj = ref.object
+            if obj.type == "tag":
+                tag_obj = repo.get_git_tag(obj.sha)
+                if tag_obj.object.type == "commit":
+                    return tag_obj.object.sha
+            elif obj.type == "commit":
+                return obj.sha
+        except Exception:
+            pass
+
+        try:
+            return repo.get_commit(cand).sha
+        except Exception:
+            pass
+
+        try:
+            data = read_url(f"https://api.github.com/repos/{repo.full_name}/commits/{cand}")
+            sha = json.loads(data).get("sha")
+            if sha:
+                return sha
+        except Exception:
+            pass
 
     raise ValueError(f"Invalid tag or branch: `{label}` for {repo}")
+
+
+def _to_commit_hash_compat(repo: Repository, label: str) -> str:
+    """Compatibility wrapper: supports both (repo, label) and (label) call signatures."""
+    try:
+        return _to_commit_hash(repo, label)
+    except TypeError:
+        return _to_commit_hash(label)
 
 
 @dataclass(eq=True, unsafe_hash=True)
@@ -357,9 +391,9 @@ def get_lean4_commit_from_config(config_dict: Dict[str, Any]) -> str:
     version = config[len(prefix) :]
 
     if version.startswith("nightly"):
-        return _to_commit_hash(LEAN4_NIGHTLY_REPO, version)
+        return _to_commit_hash_compat(LEAN4_NIGHTLY_REPO, version)
     else:
-        return _to_commit_hash(LEAN4_REPO, version)
+                return _to_commit_hash_compat(LEAN4_REPO, version)
 
 
 URL = TAG = COMMIT = str
@@ -445,7 +479,7 @@ class LeanGitRepo:
             if (self.url, self.commit) in info_cache.tag2commit:
                 commit = info_cache.tag2commit[(self.url, self.commit)]
             else:
-                commit = _to_commit_hash(self.repo, self.commit)
+                commit = _to_commit_hash_compat(self.repo, self.commit)
                 assert _COMMIT_REGEX.fullmatch(commit), f"Invalid commit hash: {commit}"
                 info_cache.tag2commit[(self.url, self.commit)] = commit
             object.__setattr__(self, "commit", commit)
@@ -498,18 +532,22 @@ class LeanGitRepo:
         
         user_name, repo_name = _split_git_url(self.url)
         local_repo_path = Path(os.environ["REPO_DIR"]) / user_name / repo_name
+        local_repo_path.parent.mkdir(parents=True, exist_ok=True)
+
         if os.path.exists(local_repo_path):
             logger.info(f"{self} already exists locally.")
         else:
             logger.debug(f"Cloning {self}")
-            execute(f"git clone -n --recursive {self.url}", capture_output=True)
-        
-        
-            with working_directory(local_repo_path):
-                execute(
-                    f"git checkout {self.commit} && git submodule update --recursive",
-                    capture_output=True,
-                )
+            execute(
+                f"git clone -n --recursive {self.url} {local_repo_path}",
+                capture_output=True,
+            )
+
+        with working_directory(local_repo_path):
+            execute(
+                f"git checkout {self.commit} && git submodule update --recursive",
+                capture_output=True,
+            )
 
     def get_dependencies(
         self, path: Union[str, Path, None] = None
@@ -591,7 +629,7 @@ class LeanGitRepo:
                 commit = rev
             else:
                 try:
-                    commit = _to_commit_hash(url_to_repo(url), rev)
+                    commit = _to_commit_hash_compat(url_to_repo(url), rev)
                 except ValueError:
                     commit = get_latest_commit(url)
                 assert _COMMIT_REGEX.fullmatch(commit)
