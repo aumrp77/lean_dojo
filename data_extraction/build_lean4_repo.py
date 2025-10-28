@@ -154,7 +154,6 @@ def is_new_version(v: str) -> bool:
 
 
 def main() -> None:
-    import ipdb; ipdb.set_trace()
     parser = argparse.ArgumentParser()
     parser.add_argument("repo_name")
     parser.add_argument("--no-deps", action="store_true")

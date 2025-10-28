@@ -35,6 +35,11 @@ def _trace(repo: LeanGitRepo, build_deps: bool) -> None:
         repo.clone_and_checkout()
 
     logger.debug(f"Tracing {repo}")
+    toolchain = repo.toolchain_spec()
+    if toolchain:
+        logger.info(f"{repo} declares toolchain {toolchain}")
+    else:
+        logger.warning(f"No lean-toolchain found for {repo}; proceeding without explicit toolchain.")
     container = get_container()
     mts = {
         Path(os.environ.get("RAID_DIR")) / "repos" / user_name / repo_name: f"/workspace/{user_name}/{repo_name}",
@@ -48,7 +53,6 @@ def _trace(repo: LeanGitRepo, build_deps: bool) -> None:
         cmd += " --no-deps"
 
     try:
-        import ipdb; ipdb.set_trace()
         container.run(
             cmd,
             create_mounts(mts),

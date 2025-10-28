@@ -118,7 +118,6 @@ class NativeContainer(Container):
 
     def _mount_files(self, mounts: List[Mount]) -> None:
         cwd = Path.cwd()
-        import ipdb; ipdb.set_trace()
         for src, dst in mounts:
             if dst.is_absolute():
                 dst = cwd / dst.relative_to(dst.root)
@@ -134,7 +133,6 @@ class NativeContainer(Container):
 
     def _unmount_files(self, mounts: List[Mount]) -> None:
         cwd = Path.cwd()
-
         for src, dst in mounts:
             if dst.is_absolute():
                 dst = cwd / dst.relative_to(dst.root)
@@ -184,7 +182,6 @@ class NativeContainer(Container):
         assert memory_limit is None, "NativeContainer does not support memory limit."
         assert cpu_limit is None, "NativeContainer does not support CPU limit."
 
-        import ipdb; ipdb.set_trace()
         self._mount_files(mounts)
 
         cmd = self._build_native_command(command, envs)

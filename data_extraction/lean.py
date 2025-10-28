@@ -50,11 +50,18 @@ LEAN4_REPO = GITHUB.get_repo("leanprover/lean4")
 LEAN4_NIGHTLY_REPO = GITHUB.get_repo("leanprover/lean4-nightly")
 """The GitHub Repo for Lean 4 nightly releases."""
 
+TOOLCHAIN_OVERRIDES = {
+    "ImperialCollegeLondon/FLT": "leanprover/lean4:v4.25.0-rc1",
+}
+
 _URL_REGEX = re.compile(r"(?P<url>.*?)/*")
 
 
 def normalize_url(url: str) -> str:
-    return _URL_REGEX.fullmatch(url)["url"]  # Remove trailing `/`.
+    cleaned = _URL_REGEX.fullmatch(url)["url"]  # Remove trailing `/`.
+    if cleaned.endswith(".git"):
+        cleaned = cleaned[:-4]
+    return cleaned
 
 
 @cache
@@ -143,12 +150,17 @@ def _to_commit_hash(repo: Repository, label: str) -> str:
     raise ValueError(f"Invalid tag or branch: `{label}` for {repo}")
 
 
-def _to_commit_hash_compat(repo: Repository, label: str) -> str:
-    """Compatibility wrapper: supports both (repo, label) and (label) call signatures."""
+def _to_commit_hash_compat(*args, **kwargs):
+    """
+    Compatibility wrapper for LeanDojo versions that define _to_commit_hash with either:
+      (repo: Repository, label: str)  OR  (label: str)
+    """
     try:
-        return _to_commit_hash(repo, label)
+        return _to_commit_hash(*args, **kwargs)
     except TypeError:
-        return _to_commit_hash(label)
+        if len(args) == 2 and not kwargs:
+            return _to_commit_hash(args[1])
+        raise
 
 
 @dataclass(eq=True, unsafe_hash=True)
@@ -525,29 +537,40 @@ class LeanGitRepo:
     def exists(self) -> bool:
         return url_exists(self.commit_url)
 
+    def toolchain_spec(self) -> Optional[str]:
+        owner_repo = "/".join(self.url.split("/")[-2:])
+        if owner_repo in TOOLCHAIN_OVERRIDES:
+            return TOOLCHAIN_OVERRIDES[owner_repo]
+        try:
+            config = self.get_config("lean-toolchain")
+        except Exception:
+            return None
+        content = (config.get("content") or "").strip()
+        return content or None
+
     def clone_and_checkout(self) -> None:
-        """Clone the repo to the current working directory and checkout a specific commit."""
-        # Check if the repo already exists.
-        # If it exists, we assume it has been checked out to the correct commit.
-        
-        user_name, repo_name = _split_git_url(self.url)
-        local_repo_path = Path(os.environ["REPO_DIR"]) / user_name / repo_name
+        """
+        Clone the repo into $REPO_DIR/<owner>/<name> (creating parents), then checkout the pinned commit
+        and update submodules. If it already exists, assume it's correct and skip.
+        """
+        owner, name = _split_git_url(self.url)
+        base = Path(os.environ.get("REPO_DIR", "."))
+        local_repo_path = (base / owner / name).resolve()
         local_repo_path.parent.mkdir(parents=True, exist_ok=True)
 
-        if os.path.exists(local_repo_path):
-            logger.info(f"{self} already exists locally.")
-        else:
-            logger.debug(f"Cloning {self}")
-            execute(
-                f"git clone -n --recursive {self.url} {local_repo_path}",
-                capture_output=True,
-            )
+        if local_repo_path.exists():
+            logger.info(f"{self} already exists locally at {local_repo_path}.")
+            return
+
+        logger.debug(f"Cloning {self} into {local_repo_path}")
+        execute(
+            f'git clone -n --recursive "{self.url}" "{local_repo_path}"',
+            capture_output=True,
+        )
 
         with working_directory(local_repo_path):
-            execute(
-                f"git checkout {self.commit} && git submodule update --recursive",
-                capture_output=True,
-            )
+            execute(f'git checkout "{self.commit}"', capture_output=True)
+            execute("git submodule update --init --recursive", capture_output=True)
 
     def get_dependencies(
         self, path: Union[str, Path, None] = None
