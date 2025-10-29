@@ -162,20 +162,22 @@ def main() -> None:
     num_procs = int(os.environ["NUM_PROCS"])
     repo_name = args.repo_name
     os.chdir(repo_name)
-    
-    if is_new_version(get_lean_version()):
-            packages_path = ".lake/packages"
-            build_path = ".lake/build"
+
+    lean_version = get_lean_version()
+    use_new_layout = is_new_version(lean_version)
+    if use_new_layout:
+        packages_path = ".lake/packages"
+        build_path = ".lake/build"
     else:
         packages_path = "lake-packages"
         build_path = "build"
-    
-    # if check_files(packages_path, args.no_deps):
-    #     logger.info(f"The repo {repo_name} has already been traced.")
-    #     return
+
+    if check_files(packages_path, args.no_deps):
+        logger.info(f"The repo {repo_name} has already been traced.")
+        return
 
     # If the lean4 package exists, we assume the build has completed and we just need to trace
-    if (Path(".lake/packages/lean4") if is_new_version(get_lean_version()) else Path("lake-packages/lean4")).exists():
+    if (Path(".lake/packages/lean4") if use_new_layout else Path("lake-packages/lean4")).exists():
         logger.info(f"The repo {repo_name} has already been built, but has not been traced.")
     else:
         # Build the repo using lake.
