@@ -94,8 +94,12 @@ def launch_progressbar(paths: List[Union[str, Path]]) -> Generator[None, None, N
     num_total = len(olean_files)
     p = Process(target=_monitor, args=(paths, num_total), daemon=True)
     p.start()
-    yield
-    p.kill()
+    try:
+        yield
+    finally:
+        p.join(timeout=1)
+        if p.is_alive():
+            p.terminate()
 
 
 def get_lean_version() -> str:
@@ -163,6 +167,10 @@ def main() -> None:
     repo_name = args.repo_name
     os.chdir(repo_name)
 
+    extractor_src = Path(__file__).with_name("ExtractData.lean").resolve()
+    extractor_dst = Path("ExtractData.lean")
+    shutil.copy2(extractor_src, extractor_dst)
+
     lean_version = get_lean_version()
     use_new_layout = is_new_version(lean_version)
     if use_new_layout:
@@ -171,10 +179,6 @@ def main() -> None:
     else:
         packages_path = "lake-packages"
         build_path = "build"
-
-    if check_files(packages_path, args.no_deps):
-        logger.info(f"The repo {repo_name} has already been traced.")
-        return
 
     # If the lean4 package exists, we assume the build has completed and we just need to trace
     if (Path(".lake/packages/lean4") if use_new_layout else Path("lake-packages/lean4")).exists():
@@ -201,12 +205,16 @@ def main() -> None:
         dirs_to_monitor.append(packages_path)
     
     logger.info(f"Tracing {repo_name}")
-    with launch_progressbar(dirs_to_monitor):
-        cmd = f"lake env lean --threads {num_procs} --run ExtractData.lean"
-        if args.no_deps:
-            cmd += " noDeps"
-        logger.debug(cmd)
-        run_cmd(cmd, capture_output=True)
+    try:
+        with launch_progressbar(dirs_to_monitor):
+            cmd = f"lake env lean --threads {num_procs} --run ExtractData.lean"
+            if args.no_deps:
+                cmd += " noDeps"
+            logger.debug(cmd)
+            run_cmd(cmd, capture_output=True)
+    finally:
+        if extractor_dst.exists():
+            extractor_dst.unlink()
 
     assert check_files(packages_path, args.no_deps), "Some files failed to be processed."
 
