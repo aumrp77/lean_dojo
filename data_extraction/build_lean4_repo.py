@@ -4,6 +4,7 @@ Only this file runs in Docker. So it must be self-contained.
 """
 
 import os
+import sys
 import re
 import shutil
 import argparse
@@ -31,6 +32,60 @@ def run_cmd(cmd: Union[str, List[str]], capture_output: bool = False) -> Optiona
         return res.stdout.decode()
     else:
         return None
+
+
+def is_macos() -> bool:
+    return sys.platform == "darwin"
+
+
+def _patch_dylib(path: Path) -> None:
+    """Adjust __DATA_CONST flags so macOS 15 accepts the library."""
+    try:
+        subprocess.run(
+            [
+                "xcrun",
+                "vtool",
+                "-set",
+                "segprot",
+                "__DATA_CONST",
+                "r--",
+                "rw-",
+                str(path),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            [
+                "xcrun",
+                "vtool",
+                "-set",
+                "segflags",
+                "__DATA_CONST",
+                "0x4",
+                str(path),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        subprocess.run(
+            ["codesign", "--force", "--sign", "-", str(path)],
+            check=True,
+            capture_output=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError) as ex:
+        logger.warning(f"Failed to patch {path}: {ex}")
+
+
+def patch_dylibs(root: Path) -> None:
+    if not is_macos():
+        return
+    dylibs = list(root.rglob("*.dylib"))
+    if not dylibs:
+        return
+    logger.debug(f"Patching {len(dylibs)} dylibs under {root}")
+    for dylib in dylibs:
+        _patch_dylib(dylib)
 
 
 def record_paths(dir: Path, root: Path, lean_bin: Path) -> None:
@@ -192,7 +247,22 @@ def main() -> None:
                 run_cmd("lake exe cache get")
             except subprocess.CalledProcessError:
                 pass
-        run_cmd("lake build")
+
+        # Try building; on macOS, if the build fails due to SG_READ_ONLY, patch dylibs and retry once.
+        try:
+            run_cmd("lake build")
+        except subprocess.CalledProcessError as e:
+            if is_macos():
+                logger.warning("lake build failed; patching dylibs for macOS and retrying once")
+                patch_dylibs(Path(packages_path))
+                patch_dylibs(Path(build_path))
+                run_cmd("lake build")
+            else:
+                raise
+
+        # Ensure final artifacts are patched as well.
+        patch_dylibs(Path(packages_path))
+        patch_dylibs(Path(build_path))
 
         # Copy the Lean 4 stdlib into the path of packages.
         lean_prefix = run_cmd(f"lean --print-prefix", capture_output=True).strip()

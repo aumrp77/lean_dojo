@@ -382,6 +382,18 @@ _COMMIT_REGEX = re.compile(r"[0-9a-z]+")
 _LEAN4_VERSION_REGEX = re.compile(r"leanprover/lean4:(?P<version>.+?)")
 
 
+def _read_toolchain_content(config_dict: Dict[str, Any]) -> str:
+    """Extract the textual content of a lean-toolchain definition."""
+    content = config_dict.get("content")
+    if content is None:
+        download_url = config_dict.get("download_url")
+        if download_url:
+            content = read_url(download_url)
+        else:
+            raise KeyError("config_dict must have a 'content' field or a 'download_url'")
+    return content.strip()
+
+
 def get_lean4_version_from_config(toolchain: str) -> str:
     """Return the required Lean version given a ``lean-toolchain`` config."""
     m = _LEAN4_VERSION_REGEX.fullmatch(toolchain.strip())
@@ -391,8 +403,7 @@ def get_lean4_version_from_config(toolchain: str) -> str:
 
 def get_lean4_commit_from_config(config_dict: Dict[str, Any]) -> str:
     """Return the required Lean commit given a ``lean-toolchain`` config."""
-    assert "content" in config_dict, "config_dict must have a 'content' field"
-    config = config_dict["content"].strip()
+    config = _read_toolchain_content(config_dict)
     prefix = "leanprover/lean4:"
 
     if config == f"{prefix}nightly":
@@ -404,8 +415,39 @@ def get_lean4_commit_from_config(config_dict: Dict[str, Any]) -> str:
 
     if version.startswith("nightly"):
         return _to_commit_hash_compat(LEAN4_NIGHTLY_REPO, version)
-    else:
-                return _to_commit_hash_compat(LEAN4_REPO, version)
+
+    def _try_labels(labels: List[str]):
+        for label in labels:
+            try:
+                return _to_commit_hash_compat(LEAN4_REPO, label)
+            except ValueError:
+                continue
+        raise ValueError
+
+    labels_to_try = [version]
+    if not version.startswith("v"):
+        labels_to_try.append(f"v{version}")
+
+    try:
+        return _try_labels(labels_to_try)
+    except ValueError:
+        tags = LEAN4_REPO.get_tags()
+        for tag in tags:
+            if tag.name == version or tag.name == f"v{version}":
+                logger.warning(
+                    f"Falling back to Lean tag {tag.name} for toolchain version {version}."
+                )
+                return tag.commit.sha
+            if version in tag.name:
+                logger.warning(
+                    f"Approximating Lean toolchain {version} with tag {tag.name}."
+                )
+                return tag.commit.sha
+
+        logger.warning(
+            f"Unable to resolve Lean toolchain {version}; falling back to latest commit of leanprover/lean4."
+        )
+        return LEAN4_REPO.get_commits()[0].sha
 
 
 URL = TAG = COMMIT = str
@@ -504,7 +546,7 @@ class LeanGitRepo:
         else:
             config = self.get_config("lean-toolchain")
             lean_version = get_lean4_commit_from_config(config)
-            v = get_lean4_version_from_config(config["content"])
+            v = get_lean4_version_from_config(_read_toolchain_content(config))
             if not is_supported_version(v):
                 logger.warning(
                     f"{self} relies on an unsupported Lean version: {lean_version}"
