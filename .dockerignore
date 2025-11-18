@@ -1,0 +1,8 @@
+RAID
+workspace
+**/.lake
+**/__pycache__
+**/*.olean
+**/*.log
+.git
+.venv
